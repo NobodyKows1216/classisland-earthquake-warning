@@ -85,9 +85,20 @@ public static class EarthquakeApi
 
     private static System.Net.Http.HttpClient CreateClient()
     {
-        var client = new System.Net.Http.HttpClient
+        // 熄屏/休眠后系统的连接可能已经失效，限制连接池寿命并设置较短的连接超时，
+        // 避免轮询卡在旧连接上；请求超时会由调用方当作一次普通失败处理并继续重试。
+        var handler = new System.Net.Http.SocketsHttpHandler
         {
-            Timeout = TimeSpan.FromSeconds(10),
+            // 该接口在国内可直连；不跟随系统代理，避免熄屏后代理断开导致轮询一直失败。
+            UseProxy = false,
+            ConnectTimeout = TimeSpan.FromSeconds(5),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
+            AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
+        };
+        var client = new System.Net.Http.HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(8),
         };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("ClassIsland-EarthquakeWarning/1.0");
         client.DefaultRequestHeaders.Accept.ParseAdd("application/json");

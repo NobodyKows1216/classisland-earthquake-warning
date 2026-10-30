@@ -1,10 +1,10 @@
-﻿# name: 地震预警
+# name: 地震预警
 id: classisland.earthquake.warning
 name: 地震预警
 description: 实时显示中国地震台网（CENC）地震预警信息与最新地震，支持语音播报。
 entranceAssembly: "ClassIsland.EarthquakeWarning.dll"
 url: https://github.com/NobodyKows1216/classisland-earthquake-warning
-version: 1.0.0.0
+version: 1.0.1.0
 apiVersion: 2.0.0.0
 author: NobodyKows1216
 icon: icon.png

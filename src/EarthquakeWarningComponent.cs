@@ -51,7 +51,10 @@ public class EarthquakeWarningComponent : ComponentBase<EarthquakeWarningSetting
     private readonly List<TextBlock> _tintableTexts = new();
 
     private CancellationTokenSource? _cts;
+    private readonly DispatcherTimer _watchdog;
     private long _lastEqFetchTicks;
+    private long _lastSuccessTicksUtc;
+    private long _lastRestartTicksUtc;
     private string? _lastSpokenEventId;
     private CencEew? _lastEew;
     private List<EqEvent> _eqEvents = new();
@@ -223,6 +226,12 @@ public class EarthquakeWarningComponent : ComponentBase<EarthquakeWarningSetting
         MinWidth = 240;
         ToolTip.SetTip(this, "数据：中国地震台网（CENC）/ Wolfx · 仅供参考，请以官方发布为准。");
 
+        _watchdog = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(2),
+        };
+        _watchdog.Tick += (_, _) => CheckHealth();
+
         AttachedToVisualTree += (_, _) => StartMonitoring();
         AttachedToVisualTree += (_, _) => MarkLoaded();
         DetachedFromVisualTree += (_, _) => StopMonitoring();
@@ -236,13 +245,17 @@ public class EarthquakeWarningComponent : ComponentBase<EarthquakeWarningSetting
         }
 
         ApplyIdleForeground();
-        _cts = new CancellationTokenSource();
+        Interlocked.Exchange(ref _lastSuccessTicksUtc, DateTime.UtcNow.Ticks);
+        var cts = new CancellationTokenSource();
+        _cts = cts;
         _updatedText.Text = "正在连接…";
-        _ = Task.Run(() => MonitorAsync(_cts.Token));
+        _watchdog.Start();
+        _ = Task.Run(() => MonitorAsync(cts.Token));
     }
 
     private void StopMonitoring()
     {
+        _watchdog.Stop();
         var cts = _cts;
         _cts = null;
         try
@@ -255,6 +268,73 @@ public class EarthquakeWarningComponent : ComponentBase<EarthquakeWarningSetting
         }
 
         cts?.Dispose();
+    }
+
+    private void CheckHealth()
+    {
+        try
+        {
+            if (_cts == null)
+            {
+                return;
+            }
+
+            var interval = 2;
+            try
+            {
+                interval = Math.Clamp(Settings.RefreshIntervalSeconds, 1, 10);
+            }
+            catch
+            {
+                // ignored
+            }
+
+            var last = Interlocked.Read(ref _lastSuccessTicksUtc);
+            if (last <= 0)
+            {
+                return;
+            }
+
+            var staleSeconds = (DateTime.UtcNow - new DateTime(last, DateTimeKind.Utc)).TotalSeconds;
+            if (staleSeconds <= Math.Max(12, interval * 5))
+            {
+                return;
+            }
+
+            var nowTicks = DateTime.UtcNow.Ticks;
+            var lastRestart = Interlocked.Read(ref _lastRestartTicksUtc);
+            if (nowTicks - lastRestart < TimeSpan.TicksPerSecond * 5)
+            {
+                return;
+            }
+
+            Interlocked.Exchange(ref _lastRestartTicksUtc, nowTicks);
+            _logger.LogWarning("地震预警数据已 {Seconds:0} 秒未更新，重新启动轮询", staleSeconds);
+            RestartMonitoring();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "检查地震预警轮询状态失败");
+        }
+    }
+
+    private void RestartMonitoring()
+    {
+        var old = _cts;
+        _cts = null;
+        try
+        {
+            old?.Cancel();
+        }
+        catch
+        {
+            // ignored
+        }
+
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        _updatedText.Text = "重连中…";
+        _ = Task.Run(() => MonitorAsync(cts.Token));
     }
 
     private void MarkLoaded()
@@ -323,10 +403,16 @@ public class EarthquakeWarningComponent : ComponentBase<EarthquakeWarningSetting
             try
             {
                 eew = await EarthquakeApi.GetEewAsync(token).ConfigureAwait(false);
+                Interlocked.Exchange(ref _lastSuccessTicksUtc, DateTime.UtcNow.Ticks);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
                 break;
+            }
+            catch (OperationCanceledException ex)
+            {
+                failed = true;
+                _logger.LogWarning(ex, "地震预警请求超时，稍后重试");
             }
             catch (Exception ex)
             {
@@ -340,10 +426,16 @@ public class EarthquakeWarningComponent : ComponentBase<EarthquakeWarningSetting
                 {
                     events = await EarthquakeApi.GetEqListAsync(token).ConfigureAwait(false);
                     Interlocked.Exchange(ref _lastEqFetchTicks, DateTime.UtcNow.Ticks);
+                    Interlocked.Exchange(ref _lastSuccessTicksUtc, DateTime.UtcNow.Ticks);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
                     break;
+                }
+                catch (OperationCanceledException ex)
+                {
+                    failed = true;
+                    _logger.LogWarning(ex, "地震目录请求超时，稍后重试");
                 }
                 catch (Exception ex)
                 {
@@ -413,6 +505,7 @@ public class EarthquakeWarningComponent : ComponentBase<EarthquakeWarningSetting
             }
             else
             {
+                Interlocked.Exchange(ref _lastSuccessTicksUtc, DateTime.UtcNow.Ticks);
                 _statusDot.Fill = active != null
                     ? new SolidColorBrush(Color.Parse("#FFEBEE"))
                     : new SolidColorBrush(Color.Parse("#38D169"));
